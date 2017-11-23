@@ -48,6 +48,10 @@
     "translation": "September"
   },
   {
+    "id": "api.adfs_oauth.adfs_error",
+    "translation": "Problem with ADFS authentication/config"
+  },
+  {
     "id": "api.admin.add_certificate.no_file.app_error",
     "translation": "No file under 'certificate' in request."
   },

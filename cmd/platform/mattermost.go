@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	// Plugins
+	_ "github.com/mattermost/mattermost-server/model/adfs"
 	_ "github.com/mattermost/mattermost-server/model/gitlab"
 
 	// Enterprise Imports

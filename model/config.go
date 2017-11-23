@@ -34,6 +34,7 @@ const (
 	SERVICE_GITLAB    = "gitlab"
 	SERVICE_GOOGLE    = "google"
 	SERVICE_OFFICE365 = "office365"
+	SERVICE_ADFS      = "adfs"
 
 	WEBSERVER_MODE_REGULAR  = "regular"
 	WEBSERVER_MODE_GZIP     = "gzip"
@@ -498,6 +499,15 @@ type SSOSettings struct {
 	AuthEndpoint    string
 	TokenEndpoint   string
 	UserApiEndpoint string
+}
+
+type ADFSSettings struct {
+	Enable                 bool
+	RelyingPartyIdentifier string
+	Id                     string
+	AuthEndpoint           string
+	TokenEndpoint          string
+	PubKey                 string
 }
 
 type SqlSettings struct {
@@ -1631,6 +1641,7 @@ type Config struct {
 	GitLabSettings        SSOSettings
 	GoogleSettings        SSOSettings
 	Office365Settings     SSOSettings
+	ADFSSettings          ADFSSettings
 	LdapSettings          LdapSettings
 	ComplianceSettings    ComplianceSettings
 	LocalizationSettings  LocalizationSettings
@@ -1672,6 +1683,15 @@ func (o *Config) GetSSOService(service string) *SSOSettings {
 		return &o.GoogleSettings
 	case SERVICE_OFFICE365:
 		return &o.Office365Settings
+	}
+
+	return nil
+}
+
+func (o *Config) GetSSOServiceADFS(service string) *ADFSSettings {
+	switch service {
+	case SERVICE_ADFS:
+		return &o.ADFSSettings
 	}
 
 	return nil

@@ -563,9 +563,29 @@ func generateOAuthStateTokenExtra(email, action, cookie string) string {
 }
 
 func (a *App) GetAuthorizationCode(w http.ResponseWriter, r *http.Request, service string, props map[string]string, loginHint string) (string, *model.AppError) {
-	sso := a.Config().GetSSOService(service)
-	if sso != nil && !sso.Enable {
-		return "", model.NewAppError("GetAuthorizationCode", "api.user.get_authorization_code.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
+	var scope string
+	var clientId string
+	var endpoint string
+	var resource string
+
+	if service == "adfs" {
+		adfs := a.Config().GetSSOServiceADFS(service)
+		if adfs != nil && !adfs.Enable {
+			return "", model.NewAppError("GetAuthorizationCode", "api.user.get_authorization_code.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
+		} else {
+			clientId = adfs.Id
+			endpoint = adfs.AuthEndpoint
+			resource = adfs.RelyingPartyIdentifier
+		}
+	} else {
+		sso := a.Config().GetSSOService(service)
+		if sso != nil && !sso.Enable {
+			return "", model.NewAppError("GetAuthorizationCode", "api.user.get_authorization_code.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
+		} else {
+			clientId = sso.Id
+			endpoint = sso.AuthEndpoint
+			scope = sso.Scope
+		}
 	}
 
 	secure := false
@@ -587,9 +607,6 @@ func (a *App) GetAuthorizationCode(w http.ResponseWriter, r *http.Request, servi
 
 	http.SetCookie(w, oauthCookie)
 
-	clientId := sso.Id
-	endpoint := sso.AuthEndpoint
-	scope := sso.Scope
 
 	tokenExtra := generateOAuthStateTokenExtra(props["email"], props["action"], cookieValue)
 	stateToken, err := a.CreateOAuthStateToken(tokenExtra)
@@ -612,14 +629,40 @@ func (a *App) GetAuthorizationCode(w http.ResponseWriter, r *http.Request, servi
 		authUrl += "&login_hint=" + utils.UrlEncode(loginHint)
 	}
 
+	if len(resource) > 0 {
+		authUrl += "&resource=" + utils.UrlEncode(resource)
+	}
+	
 	return authUrl, nil
 }
 
 func (a *App) AuthorizeOAuthUser(w http.ResponseWriter, r *http.Request, service, code, state, redirectUri string) (io.ReadCloser, string, map[string]string, *model.AppError) {
-	sso := a.Config().GetSSOService(service)
-	if sso == nil || !sso.Enable {
-		return nil, "", nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
-	}
+	var clientId string
+	var secret string
+	var tokenendpoint string
+	var userapiendpoint string
+	var pubkey string
+
+	if service == "adfs" {
+		adfs := a.Config().GetSSOServiceADFS(service)
+		if adfs != nil && !adfs.Enable {
+			return nil, "", nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
+		} else {
+			clientId = adfs.Id
+			tokenendpoint = adfs.TokenEndpoint
+			pubkey = adfs.PubKey
+		}
+	} else {
+		sso := a.Config().GetSSOService(service)
+		if sso != nil && !sso.Enable {
+			return nil, "", nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
+		} else {
+			clientId = sso.Id
+			tokenendpoint = sso.TokenEndpoint
+			secret = sso.Secret
+			userapiendpoint = sso.UserApiEndpoint
+		}
+	}	
 
 	stateStr := ""
 	if b, err := b64.StdEncoding.DecodeString(state); err != nil {
@@ -668,50 +711,60 @@ func (a *App) AuthorizeOAuthUser(w http.ResponseWriter, r *http.Request, service
 	teamId := stateProps["team_id"]
 
 	p := url.Values{}
-	p.Set("client_id", sso.Id)
-	p.Set("client_secret", sso.Secret)
+	p.Set("client_id", clientId)
+	p.Set("client_secret", secret)
 	p.Set("code", code)
 	p.Set("grant_type", model.ACCESS_TOKEN_GRANT_TYPE)
 	p.Set("redirect_uri", redirectUri)
 
-	req, _ := http.NewRequest("POST", sso.TokenEndpoint, strings.NewReader(p.Encode()))
+	req, _ := http.NewRequest("POST", tokenendpoint, strings.NewReader(p.Encode()))
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	var ar *model.AccessResponse
 	var bodyBytes []byte
 	if resp, err := a.HTTPClient(true).Do(req); err != nil {
 		return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.token_failed.app_error", nil, err.Error(), http.StatusInternalServerError)
 	} else {
-		ar = model.AccessResponseFromJson(resp.Body)
-		consumeAndClose(resp)
+		if service == "adfs" {
+			ac, err1, err2 := AccessResponseFromJsonADFS(resp.Body, pubkey)
+			if len(err2) == 0 && ac != nil {
+				return ac, teamId, stateProps, nil
+			} else {
+				return nil, "", nil, model.NewAppError(err1, "api.adfs_oauth.adfs_error", nil, err2, http.StatusInternalServerError)
+			}	
+		} else {
+			var ar *model.AccessResponse
+			ar = model.AccessResponseFromJson(resp.Body)
+			consumeAndClose(resp)
 
-		if ar == nil {
-			return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.bad_response.app_error", nil, "response_body="+string(bodyBytes), http.StatusInternalServerError)
+			if ar == nil {
+				return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.bad_response.app_error", nil, "response_body="+string(bodyBytes), http.StatusInternalServerError)
+			}
+		
+			if strings.ToLower(ar.TokenType) != model.ACCESS_TOKEN_TYPE {
+				return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.bad_token.app_error", nil, "token_type="+ar.TokenType+", response_body="+string(bodyBytes), http.StatusInternalServerError)
+			}
+
+			if len(ar.AccessToken) == 0 {
+				return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.missing.app_error", nil, "response_body="+string(bodyBytes), http.StatusInternalServerError)
+			}
+
+			p = url.Values{}
+			p.Set("access_token", ar.AccessToken)
+			req, _ = http.NewRequest("GET", userapiendpoint, strings.NewReader(""))
+
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Authorization", "Bearer "+ar.AccessToken)
+
+
+			if resp, err := a.HTTPClient(true).Do(req); err != nil {
+				return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.service.app_error", map[string]interface{}{"Service": service}, err.Error(), http.StatusInternalServerError)
+			} else {
+				return resp.Body, teamId, stateProps, nil
+			}
 		}
-	}
-
-	if strings.ToLower(ar.TokenType) != model.ACCESS_TOKEN_TYPE {
-		return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.bad_token.app_error", nil, "token_type="+ar.TokenType+", response_body="+string(bodyBytes), http.StatusInternalServerError)
-	}
-
-	if len(ar.AccessToken) == 0 {
-		return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.missing.app_error", nil, "response_body="+string(bodyBytes), http.StatusInternalServerError)
-	}
-
-	p = url.Values{}
-	p.Set("access_token", ar.AccessToken)
-	req, _ = http.NewRequest("GET", sso.UserApiEndpoint, strings.NewReader(""))
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+ar.AccessToken)
-
-	if resp, err := a.HTTPClient(true).Do(req); err != nil {
-		return nil, "", stateProps, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.service.app_error", map[string]interface{}{"Service": service}, err.Error(), http.StatusInternalServerError)
-	} else {
-		return resp.Body, teamId, stateProps, nil
 	}
 
 }
